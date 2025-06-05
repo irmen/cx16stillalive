@@ -1,3 +1,12 @@
+; ---------------------------------------------
+; | Portal's "Still Alive" credits sequence.  |
+; | Features:                                 |
+; |  - no IRQs used, instead coroutines.      |
+; |    (up to 5 concurrent tasks are used)    |
+; |  - 16 bit 22kHz adpcm music playback.     |
+; |  - no assembly required (pure Prog8).     |
+; ---------------------------------------------
+
 %import palette
 %import textio
 %import coroutines
@@ -13,114 +22,114 @@ main {
 
         cx16.set_screen_mode(1)
         txt.cp437()
-        draw_windows()
+        cbm.SETTIM(0,0,0)
 
         coroutines.killall()
+        void coroutines.add(&frames.draw, 0)
         void coroutines.add(&music.player, 0)
         void coroutines.add(&credits.display, 0)
         void coroutines.add(&lyrics.display, 0)
         void coroutines.add(&images.display, 0)
-        coroutines.run(0)
+        coroutines.run(0)       ; run everything until completion!
 
         cx16.set_screen_mode(0)
-        txt.print(petscii:"\ni'm still alive!\n")
+        txt.print("\n\n  I'm still alive!\n")
+        txt.color(5)
+        txt.print("\n\n  made in Prog8 by DesertFish.\n\n")
+        txt.color(8)
     }
+}
 
-    sub draw_windows() {
+frames {
+    sub draw() {
         txt.plot(0,0)
-        repeat 38 txt.chrout('-')
-        txt.spc()
-        txt.spc()
+        repeat 37 txt.chrout('-')
+        txt.plot(40,0)
         repeat 39 txt.chrout('-')
         txt.plot(0,29)
-        repeat 38 txt.chrout('-')
+        repeat 37 txt.chrout('-')
 
-        txt.plot(38,8)
-        txt.spc()
-        txt.spc()
+        ubyte row
+        for row in 1 to 28 {
+            repeat 30  void coroutines.yield()
+            txt.plot(0, row)
+            txt.chrout('|')
+            txt.plot(37, row)
+            txt.chrout('|')
+        }
+
+        for row in 1 to 7 {
+            repeat 30  void coroutines.yield()
+
+            txt.plot(39, row)
+            txt.chrout('|')
+            txt.plot(79, row)
+            txt.chrout('|')
+        }
+
+        txt.plot(40,8)
         repeat 39 txt.chrout('-')
 
-        for cx16.r0L in 1 to 28 {
-            txt.plot(0, cx16.r0L)
-            txt.chrout('|')
-            txt.plot(38, cx16.r0L)
-            txt.chrout('|')
-        }
-
-        for cx16.r0L in 1 to 7 {
-            txt.plot(39, cx16.r0L)
-            txt.chrout('|')
-            txt.plot(79, cx16.r0L)
-            txt.chrout('|')
-        }
+        txt.plot(41, credits.MAX_ROW)
+        txt.chrout('_')
     }
 }
 
 lyrics {
-    ubyte next_letter_index, line_index
-    ubyte column, row
-    uword line_ptr
-
-    sub init() {
-        next_letter_index = line_index = 0
-        column = 2
-        row = 2
-        line_ptr = stillalive.lyrics[0]
-    }
-
     sub display() {
-        init()
+        ubyte column = 2
+        ubyte row = 2
+        ubyte text_speed
+        ubyte next_line_index
+        uword line_timing
+        uword line_ptr
 
+        ; Don't use print() here, that is too slow.
+
+        void next_line()
         repeat {
-            ; TODO timing: when to print the next letter
-            ubyte letter
-            bool finished
-            letter, finished = next_letter()
-            if finished
-                return
+            if cbm.RDTIM16() >= line_timing {
+                if line_ptr[0]=='~' {
+                    ; clear the frame.
+                    for row in 2 to 27 {
+                        cx16.vaddr_autoincr(1, $b000 + 4 + row*256, 0, 2)
+                        repeat 35  cx16.VERA_DATA0 = cp437:' '
+                    }
+                    column = 2
+                    row = 2
+                } else {
+                    ; type out the line.
+                    while @(line_ptr)!=0 {
+                        uword letter_delay = cbm.RDTIM16() + text_speed
+                        while cbm.RDTIM16() <= letter_delay
+                            void coroutines.yield()
 
-            output(letter)
-            void coroutines.yield()
-        }
-
-        sub output(ubyte ltr) {
-            txt.plot(column, row)
-            when ltr {
-                '\n' -> {
+                        txt.plot(column, row)
+                        txt.chrout(@(line_ptr))
+                        txt.chrout('_')
+                        line_ptr++
+                        column++
+                    }
+                    txt.plot(column, row)
                     txt.spc()
                     column = 2
                     row++
-                }
-                '~' -> {
-                    for row in 2 to 27 {
-                        txt.plot(2, row)
-                        txt.print(" " * 35)
-                    }
-                    void next_letter()      ; skip to next line
-                    column = 2
-                    row = 2
-                }
-                else -> {
-                    txt.chrout(ltr)
+                    txt.plot(column, row)
                     txt.chrout('_')
-                    column++
                 }
+
+                if not next_line()
+                    return
             }
+            void coroutines.yield()
         }
 
-        sub next_letter() -> ubyte, bool {
-            if line_ptr[next_letter_index] == 0 {
-                ; go to next line
-                next_letter_index = 0
-                line_index++
-                line_ptr = stillalive.lyrics[line_index]
-                if line_ptr==0 {
-                    return '\n', true
-                }
-                return '\n', false
-            }
-            next_letter_index++
-            return line_ptr[next_letter_index-1], false
+        sub next_line() -> bool {
+            line_timing = stillalive.lyrics_timings[next_line_index]
+            text_speed = stillalive.lyrics_durations[next_line_index]
+            line_ptr = stillalive.lyrics[next_line_index]
+            next_line_index++
+            return line_timing!=0
         }
     }
 }
@@ -130,27 +139,41 @@ credits {
     uword line_ptr
     ubyte column
     const ubyte MAX_ROW = 7
+    uword slowness
 
     sub init() {
         next_letter_index = line_index = 0
         line_ptr = stillalive.credits[0]
         column = 41
-        txt.plot(column, MAX_ROW)
-        txt.chrout('?')
     }
 
     sub display() {
         init()
+
+        ; initial delay: 5 seconds
+        slowness = cbm.RDTIM16() + 60*5
+        while cbm.RDTIM16() < slowness
+            void coroutines.yield()
+
+        slowness = cbm.RDTIM16() + 4
+
         repeat {
+            if cbm.RDTIM16() >= slowness {
+                slowness = cbm.RDTIM16()  + 4
 
-            ; TODO timing: when to print the next letter
-            ubyte letter
-            bool finished
-            letter, finished = next_letter()
-            if finished
-                return
+                ubyte letter
+                bool finished
+                letter, finished = next_letter()
+                if finished {
+                    ; post delay: 5 seconds
+                    slowness = cbm.RDTIM16() + 60*5
+                    while cbm.RDTIM16() < slowness
+                        void coroutines.yield()
+                    return
+                }
 
-            output(letter)
+                output(letter)
+            }
             void coroutines.yield()
         }
 
@@ -170,9 +193,9 @@ credits {
         sub scrollup() {
             ubyte row
             for row in 1 to MAX_ROW-1 {
-                for column in 41 to 78 {
-                    txt.setchr(column, row, txt.getchr(column, row+1))
-                }
+                cx16.vaddr_autoincr(1, $b000 + 41*2 + row*256, 0, 2)
+                cx16.vaddr_autoincr(1, $b000 + 41*2 + (row+1)*256, 1, 2)
+                repeat 37 cx16.VERA_DATA0 = cx16.VERA_DATA1
             }
             txt.plot(41, row)
             repeat 38 txt.chrout(' ')
@@ -201,28 +224,43 @@ images {
 
     sub init() {
         next_image_index = 0
-        next_image_jiffies = cbm.RDTIM16() + 10
+        next_image_jiffies = stillalive.images_times[0]
     }
 
     sub display() {
         ubyte row
+        ubyte image
 
         init()
 
         repeat {
             if cbm.RDTIM16()>=next_image_jiffies {
-                uword stringarrayptr = stillalive.images[next_image_index]
+                image = stillalive.images_indexes[next_image_index]
+                uword stringarrayptr = stillalive.images[image]
+
                 if stringarrayptr==0 {
                     clear()
                     return
                 }
                 for row in 9 to 28 {
-                    txt.plot(39,row)
-                    txt.print(peekw(stringarrayptr))
+                    ; don't use plot/print here, that is too slow.
+                    ; txt.plot(39,row)
+                    ; txt.print(peekw(stringarrayptr))
+
+                    cx16.vaddr_autoincr(1, $b000 + 39*2 + row*256, 0, 2)
+                    cx16.r1 = peekw(stringarrayptr)
+                    for cx16.r0L in 0 to 39
+                        cx16.VERA_DATA0 = cx16.r1[cx16.r0L]
                     stringarrayptr += 2
+
+                    if row==19
+                        void coroutines.yield()     ; don't claim too much time; draw the image "in 2 halves"
                 }
-                next_image_jiffies = cbm.RDTIM16() + 10
+
                 next_image_index++
+                next_image_jiffies = stillalive.images_times[next_image_index]
+                if next_image_jiffies==0
+                    return
             }
 
             void coroutines.yield()
@@ -238,19 +276,73 @@ images {
 }
 
 music {
+    ubyte[256] adpcm_buffer
+
+    sub init() {
+        cx16.VERA_AUDIO_RATE = 0                ; halt playback
+
+        void diskio.fastmode(1)
+        if not diskio.f_open("stillalive.song")
+            return
+        void diskio.f_read(&adpcm_buffer, 256)
+        adpcm.decode_block_mono(&adpcm_buffer)
+        cx16.VERA_AUDIO_CTRL = %10101100        ; mono 16 bit, volume 12
+        cx16.VERA_AUDIO_RATE = 58               ; start audio playback, 22125 Hz
+    }
+
     sub player() {
-        ; TODO music playback
-        if diskio.f_open("stillalive.song") {
-            repeat {
-                txt.chrout('!')
-                void coroutines.yield()
+        init()
+
+        repeat {
+            if cx16.VERA_ISR & %00001000 != 0  {
+                ; AFLOW:  fifo is less than 25% full, feed me more data!
+
+                adpcm.decode_block_mono(&adpcm_buffer)
+                if diskio.f_read(&adpcm_buffer, 256) != 256 {
+                    diskio.f_close()
+                    return
+                }
+
+                ; we read directly from sdcard into the audio fifo buffer.
+;                diskio.reset_read_channel()
+;                cx16.r15 = 1024     ; read 1 Kb of PCM data
+;                while cx16.r15 != 0 {
+;                    void, cx16.r14 = cx16.MACPTR(lsb(cx16.r15), &cx16.VERA_AUDIO_DATA, true)
+;                    cx16.r15 -= cx16.r14
+;                    if cbm.READST()!=0 {
+;                        diskio.f_close()
+;                        return
+;                    }
+;                }
             }
-            diskio.f_close()
+
+            void coroutines.yield()
         }
     }
 }
 
 adpcm {
+    sub decode_block_mono(uword @requirezp nibblesptr) {
+        ; refill the fifo buffer with one decoded adpcm block (1010 bytes of pcm data)
+        init(peekw(nibblesptr), @(nibblesptr+2))
+        cx16.VERA_AUDIO_DATA = lsb(predict)
+        cx16.VERA_AUDIO_DATA = msb(predict)
+        nibblesptr += 4
+        ubyte @zp nibble
+        repeat 252/2 {
+            unroll 2 {
+                nibble = @(nibblesptr)
+                ; note: when calling decode_nibble(), the upper nibble in the argument needs to be zero
+                decode_nibble(nibble & 15)     ; first word
+                cx16.VERA_AUDIO_DATA = lsb(predict)
+                cx16.VERA_AUDIO_DATA = msb(predict)
+                decode_nibble(nibble>>4)       ; second word
+                cx16.VERA_AUDIO_DATA = lsb(predict)
+                cx16.VERA_AUDIO_DATA = msb(predict)
+                nibblesptr++
+            }
+        }
+    }
 
     ; IMA ADPCM decoder.  Supports mono and stereo streams.
     ; https://wiki.multimedia.cx/index.php/IMA_ADPCM
@@ -296,24 +388,14 @@ adpcm {
             32767]
 
     uword @requirezp predict       ; decoded 16 bit pcm sample for first channel.
-    uword @requirezp predict_2     ; decoded 16 bit pcm sample for second channel.
     ubyte @requirezp index
-    ubyte @requirezp index_2
     uword @requirezp pstep
-    uword @requirezp pstep_2
 
     sub init(uword startPredict, ubyte startIndex) {
         ; initialize first decoding channel.
         predict = startPredict
         index = startIndex
         pstep = t_step[index]
-    }
-
-    sub init_second(uword startPredict_2, ubyte startIndex_2) {
-        ; initialize second decoding channel.
-        predict_2 = startPredict_2
-        index_2 = startIndex_2
-        pstep_2 = t_step[index_2]
     }
 
     sub decode_nibble(ubyte @zp nibble) {
@@ -351,50 +433,106 @@ adpcm {
             index = len(t_step)-1
         pstep = t_step[index]
     }
-
-    sub decode_nibble_second(ubyte @zp nibble) {
-        ; Decoder for a single nibble for the second channel. (value of 'nibble' needs to be strictly 0-15 !)
-        ; This is the hotspot of the decoder algorithm!
-        ; Note that the generated assembly from this is pretty efficient,
-        ; rewriting it by hand in asm seems to improve it only ~10%.
-        cx16.r0s = 0                ; difference
-        if nibble & %0100 !=0
-            cx16.r0s += pstep_2
-        pstep_2 >>= 1
-        if nibble & %0010 !=0
-            cx16.r0s += pstep_2
-        pstep_2 >>= 1
-        if nibble & %0001 !=0
-            cx16.r0s += pstep_2
-        pstep_2 >>= 1
-        cx16.r0s += pstep_2
-        if nibble & %1000 !=0
-            predict_2 -= cx16.r0
-        else
-            predict_2 += cx16.r0
-
-        ; NOTE: the original C/Python code uses a 32 bits prediction value and clips it to a 16 bit word
-        ;       but for speed reasons we only work with 16 bit words here all the time (with possible clipping error)
-        ; if predicted > 32767:
-        ;    predicted = 32767
-        ; elif predicted < -32767:
-        ;    predicted = - 32767
-
-        index_2 += t_index[nibble] as ubyte
-        if_neg
-            index_2 = 0
-        else if index_2 >= len(t_step)-1
-            index_2 = len(t_step)-1
-        pstep_2 = t_step[index_2]
-    }
 }
 
 
 stillalive {
+    ; see https://github.com/Christopher-Hayes/portal-1-credits/blob/master/main.js
+    ubyte[89] lyrics_durations = [1, 1, 0, 0, 3, 4, 4, 5, 6, 4, 3, 5, 7, 4, 0, 4, 4, 3, 4, 4, 4, 3, 5, 0, 1, 1, 0, 2, 0, 5, 7, 6, 4, 0, 4, 8, 7, 2, 0, 3, 5, 4, 4, 3, 4, 4, 4, 0, 2, 2, 0, 2, 0, 4, 8, 6, 4, 4, 7, 7, 4, 3, 4, 3, 4, 3, 4, 3, 3, 0, 3, 3, 4, 3, 3, 3, 0, 0, 3, 3, 0, 0, 4, 3, 0, 0, 3, 0, 0]
 
-    str[] lyrics = [
-        ; TODO: TEXT, TIME POINT, DURATION
-        ; see https://github.com/Christopher-Hayes/portal-1-credits/blob/master/main.js
+    uword[89] lyrics_timings = [
+        20,
+        120,
+        442,
+        443,
+        462,
+        692,
+        813,
+        984,
+        1121,
+        1415,
+        1640,
+        1729,
+        1949,
+        2151,
+        2264,
+        2283,
+        2400,
+        2512,
+        2618,
+        2754,
+        2878,
+        2988,
+        3079,
+        3216,
+        3246,
+        3281,
+        3329,
+        3335,
+        3406,
+        3546,
+        3783,
+        4105,
+        4297,
+        4406,
+        4494,
+        4726,
+        5052,
+        5253,
+        5317,
+        5377,
+        5463,
+        5617,
+        5718,
+        5853,
+        5957,
+        6087,
+        6197,
+        6311,
+        6329,
+        6400,
+        6472,
+        6579,
+        6650,
+        6663,
+        6877,
+        7195,
+        7387,
+        7601,
+        7832,
+        8124,
+        8351,
+        8476,
+        8580,
+        8706,
+        8814,
+        8949,
+        9062,
+        9187,
+        9291,
+        9371,
+        9421,
+        9510,
+        9652,
+        9746,
+        9871,
+        9960,
+        10043,
+        10049,
+        10122,
+        10243,
+        10317,
+        10329,
+        10364,
+        10460,
+        10537,
+        10543,
+        10560,
+        10686,
+        0]
+
+
+    str[89] lyrics = [
         "Forms FORM-29827281-12:",
         "Test Assessment Report",
         "",
@@ -482,11 +620,7 @@ stillalive {
         "",
         "",
         "STILL ALIVE",
-        "",
-        "",
-        "",
         "~",
-        "",
         0
     ]
 
@@ -494,7 +628,7 @@ stillalive {
     ">LIST PERSONNEL",
     "",
     "",
-    "Gautam babbar",
+    "Gautam Babbar",
     "Ted Backman",
     "Kelly Bailey",
     "Jeff Ballinger",
@@ -658,7 +792,7 @@ stillalive {
     "",
     "",
     "Voice Casting:",
-    "Shana Landsburg Teri Fiddleman",
+    "Shana Landsburg / Teri Fiddleman",
     "",
     "",
     "Voice Recording:",
@@ -683,8 +817,8 @@ stillalive {
     "Dennis Tessier",
     "",
     "",
-    "Thanks for the user of their face:",
-    "ALesia Glidewell - Chell",
+    "Thanks for the use of their face:",
+    "Alesia Glidewell - Chell",
     "",
     "",
     "Special thanks to everyone at:",
@@ -707,19 +841,68 @@ stillalive {
     0
     ]
 
+
     uword[] images = [
         &aperture,
         &radiation,
         &atom,
         &heart,
-        &explosion,
         &fire,
         &check,
         &blackmesa,
+        &explosion,
         &cake,
-        &glados,
-        0
+        &glados
     ]
+
+    ubyte[21] images_indexes = [
+         0, ; Aperture Science
+         1, ; Radioactive
+         0, ; Aperture Science
+         2, ; Science
+         0, ; Aperture Science
+         3, ; Broken Heart
+         7, ; Destruction
+         4, ; Fire
+         5, ; Checkmark
+         7, ; Destruction
+         2, ; Science
+         0, ; Aperture Science
+         6, ; Black Mesa
+         8, ; Cake
+         9, ; GlaDOS
+         1, ; Radioactive
+         0, ; Aperture Science
+         2, ; Science
+         7, ; Destruction
+         0, ; Aperture Science
+         0 ; sentinel
+     ]
+
+    uword[21] images_times = [
+        1395,  ; Aperture Science
+        2145,  ; Radioactive
+        2278,  ; Aperture Science
+        2756,  ; Science
+        2991,  ; Aperture Science
+        4189,  ; Broken Heart
+        4528,  ; Destruction
+        4890,  ; Fire
+        5296,  ; Checkmark
+        5919,  ; Destruction
+        6009,  ; Science
+        6142,  ; Aperture Science
+        7680,  ; Black Mesa
+        8247,  ; Cake
+        8568,  ; GlaDOS
+        8677,  ; Radioactive
+        8804,  ; Aperture Science
+        9051,  ; Science
+        9166,  ; Destruction
+        9293,  ; Aperture Science
+        0      ; sentinel
+    ]
+
 
     str[20] @nosplit aperture = [
     "              .,-:;//;:=,               ",
@@ -925,7 +1108,7 @@ stillalive {
     "  .;XM###########H=   ,/X#H+:;          ",
     "     .=+HM#######M+/+HM@+=.             ",
     "         ,:/%XM####H/.                  ",
-    "              ,.:=-.                    \n"
+    "              ,.:=-.                    "
     ]
 
     str[20] @nosplit glados = [
