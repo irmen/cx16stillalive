@@ -1,6 +1,7 @@
 %import palette
 %import textio
 %import coroutines
+%import diskio
 %zeropage basicsafe
 %option no_sysinit
 %encoding iso
@@ -12,14 +13,11 @@ main {
 
         cx16.set_screen_mode(1)
         txt.cp437()
-
-        lyrics.init()
-        credits.init()
-        images.init()
         draw_windows()
 
         coroutines.killall()
-;        void coroutines.add(&credits.tick, 0)
+        void coroutines.add(&music.player, 0)
+        void coroutines.add(&credits.display, 0)
         void coroutines.add(&lyrics.display, 0)
         void coroutines.add(&images.display, 0)
         coroutines.run(0)
@@ -64,14 +62,15 @@ lyrics {
     uword line_ptr
 
     sub init() {
-        next_letter_index = 0
-        line_index = 0
+        next_letter_index = line_index = 0
         column = 2
         row = 2
         line_ptr = stillalive.lyrics[0]
     }
 
     sub display() {
+        init()
+
         repeat {
             ; TODO timing: when to print the next letter
             ubyte letter
@@ -127,38 +126,46 @@ lyrics {
 }
 
 credits {
-    bool finished
-    ubyte next_letter_index
-    ubyte line_index
-    uword line_ptr = stillalive.credits[0]
+    ubyte next_letter_index, line_index
+    uword line_ptr
     ubyte column
     const ubyte MAX_ROW = 7
 
     sub init() {
+        next_letter_index = line_index = 0
+        line_ptr = stillalive.credits[0]
         column = 41
         txt.plot(column, MAX_ROW)
         txt.chrout('?')
     }
 
-    sub tick(uword jiffies) {
-        if finished
-            return
+    sub display() {
+        init()
+        repeat {
 
-        ; TODO timing: when to print the next letter
+            ; TODO timing: when to print the next letter
+            ubyte letter
+            bool finished
+            letter, finished = next_letter()
+            if finished
+                return
 
-        ubyte letter = next_letter()
-        txt.plot(column, MAX_ROW)
-        if letter=='\n' {
-            txt.spc()
-            scrollup()
-            column = 40
-        } else {
-            txt.chrout(letter)
-            txt.chrout('_')
+            output(letter)
+            void coroutines.yield()
         }
-        column++
-        return
 
+        sub output(ubyte ltr) {
+            txt.plot(column, MAX_ROW)
+            if ltr=='\n' {
+                txt.spc()
+                scrollup()
+                column = 40
+            } else {
+                txt.chrout(ltr)
+                txt.chrout('_')
+            }
+            column++
+        }
 
         sub scrollup() {
             ubyte row
@@ -171,54 +178,54 @@ credits {
             repeat 38 txt.chrout(' ')
         }
 
-        sub next_letter() -> ubyte {
+        sub next_letter() -> ubyte, bool {
             if line_ptr[next_letter_index] == 0 {
                 ; go to next line
                 next_letter_index = 0
                 line_index++
                 line_ptr = stillalive.credits[line_index]
                 if line_ptr==0 {
-                    finished = true
+                    return '\n', true
                 }
-                return '\n'
+                return '\n', false
             }
             next_letter_index++
-            return line_ptr[next_letter_index-1]
+            return line_ptr[next_letter_index-1], false
         }
     }
 }
 
 images {
-    bool finished
     ubyte next_image_index
     uword next_image_jiffies
 
     sub init() {
-        next_image_jiffies = cbm.RDTIM16() + 100
+        next_image_index = 0
+        next_image_jiffies = cbm.RDTIM16() + 10
     }
-
 
     sub display() {
         ubyte row
 
-        if finished
-            return
+        init()
 
-        if jiffies>=next_image_jiffies {
-            uword stringarrayptr = stillalive.images[next_image_index]
-            if stringarrayptr==0 {
-                clear()
-                finished = true
-                return
+        repeat {
+            if cbm.RDTIM16()>=next_image_jiffies {
+                uword stringarrayptr = stillalive.images[next_image_index]
+                if stringarrayptr==0 {
+                    clear()
+                    return
+                }
+                for row in 9 to 28 {
+                    txt.plot(39,row)
+                    txt.print(peekw(stringarrayptr))
+                    stringarrayptr += 2
+                }
+                next_image_jiffies = cbm.RDTIM16() + 10
+                next_image_index++
             }
-            for row in 9 to 28 {
-                txt.plot(39,row)
-                txt.print(peekw(stringarrayptr))
-                stringarrayptr += 2
-            }
-            next_image_jiffies = jiffies + 60
-            next_image_index++
-            ;clear()
+
+            void coroutines.yield()
         }
 
         sub clear() {
@@ -228,9 +235,20 @@ images {
             }
         }
     }
-
 }
 
+music {
+    sub player() {
+        ; TODO music playback
+        if diskio.f_open("stillalive.song") {
+            repeat {
+                txt.chrout('!')
+                void coroutines.yield()
+            }
+            diskio.f_close()
+        }
+    }
+}
 
 adpcm {
 
