@@ -17,10 +17,10 @@
 
 main {
     sub start() {
-        txt.color2(8,0)
-        palette.set_color(8, $0fa0)     ; amber
-
         cx16.set_screen_mode(1)
+        txt.color2(8,0)
+        palette.set_color(0, $0000)     ; black
+        palette.set_color(8, $0fa0)     ; amber
         txt.cp437()
         cbm.SETTIM(0,0,0)
 
